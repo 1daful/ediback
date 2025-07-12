@@ -1,4 +1,3 @@
-// proxy.go
 package main
 
 import (
@@ -7,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 )
@@ -53,9 +51,11 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 					return
 				}
 
+				requestHost := parsedURL.Hostname() // Extracts "www.googleapis.com"
+
 				allowed := false
 				for _, host := range cfg.AllowedHosts {
-					if strings.Contains(parsedURL.Host, host) {
+					if requestHost == host {
 						allowed = true
 						break
 					}
@@ -71,7 +71,7 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 					reqBody = bytes.NewBuffer(bodyBytes)
 				}
 
-				method := strings.ToUpper(target.Method)
+				method := target.Method
 				if method == "" {
 					method = "GET"
 				}
