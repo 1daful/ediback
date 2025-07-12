@@ -1,3 +1,4 @@
+// proxy.go (no allowed host restriction)
 package main
 
 import (
@@ -48,20 +49,6 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 				parsedURL, err := url.Parse(target.URL)
 				if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
 					responses[i] = map[string]interface{}{"url": target.URL, "error": "Invalid URL"}
-					return
-				}
-
-				requestHost := parsedURL.Hostname() // Extracts "www.googleapis.com"
-
-				allowed := false
-				for _, host := range cfg.AllowedHosts {
-					if requestHost == host {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					responses[i] = map[string]interface{}{"url": target.URL, "error": "Host not allowed"}
 					return
 				}
 
