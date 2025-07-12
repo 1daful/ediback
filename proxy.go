@@ -12,12 +12,10 @@ import (
 	"time"
 )
 
-type ProxyRequestPayload struct {
-	Targets []struct {
-		URL    string                 `json:"url"`
-		Method string                 `json:"method"`
-		Body   map[string]interface{} `json:"body,omitempty"`
-	} `json:"targets"`
+type Target struct {
+	URL    string                 `json:"url"`
+	Method string                 `json:"method"`
+	Body   map[string]interface{} `json:"body,omitempty"`
 }
 
 func ProxyHandler(cfg Config) http.HandlerFunc {
@@ -35,23 +33,23 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		var payload ProxyRequestPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		var targets []Target
+		if err := json.NewDecoder(r.Body).Decode(&targets); err != nil {
 			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 			return
 		}
 
 		var wg sync.WaitGroup
-		responses := make([]map[string]interface{}, len(payload.Targets))
+		responses := make([]map[string]interface{}, len(targets))
 
-		for i, target := range payload.Targets {
+		for i, target := range targets {
 			wg.Add(1)
-			go func(i int, targetURL, method string, body map[string]interface{}) {
+			go func(i int, target Target) {
 				defer wg.Done()
 
-				parsedURL, err := url.Parse(targetURL)
+				parsedURL, err := url.Parse(target.URL)
 				if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-					responses[i] = map[string]interface{}{"url": targetURL, "error": "Invalid URL"}
+					responses[i] = map[string]interface{}{"url": target.URL, "error": "Invalid URL"}
 					return
 				}
 
@@ -63,19 +61,24 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 					}
 				}
 				if !allowed {
-					responses[i] = map[string]interface{}{"url": targetURL, "error": "Host not allowed"}
+					responses[i] = map[string]interface{}{"url": target.URL, "error": "Host not allowed"}
 					return
 				}
 
 				var reqBody io.Reader
-				if body != nil {
-					bodyBytes, _ := json.Marshal(body)
+				if target.Body != nil {
+					bodyBytes, _ := json.Marshal(target.Body)
 					reqBody = bytes.NewBuffer(bodyBytes)
 				}
 
-				req, err := http.NewRequest(method, targetURL, reqBody)
+				method := strings.ToUpper(target.Method)
+				if method == "" {
+					method = "GET"
+				}
+
+				req, err := http.NewRequest(method, target.URL, reqBody)
 				if err != nil {
-					responses[i] = map[string]interface{}{"url": targetURL, "error": "Request creation failed"}
+					responses[i] = map[string]interface{}{"url": target.URL, "error": "Request creation failed"}
 					return
 				}
 				req.Header.Set("Content-Type", "application/json")
@@ -83,7 +86,7 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 
 				resp, err := client.Do(req)
 				if err != nil {
-					responses[i] = map[string]interface{}{"url": targetURL, "error": err.Error()}
+					responses[i] = map[string]interface{}{"url": target.URL, "error": err.Error()}
 					return
 				}
 				defer resp.Body.Close()
@@ -93,12 +96,12 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 				json.Unmarshal(respBytes, &respJSON)
 
 				responses[i] = map[string]interface{}{
-					"url":     targetURL,
+					"url":     target.URL,
 					"status":  resp.StatusCode,
 					"headers": resp.Header,
 					"body":    respJSON,
 				}
-			}(i, target.URL, target.Method, target.Body)
+			}(i, target)
 		}
 
 		wg.Wait()
