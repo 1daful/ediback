@@ -1,22 +1,20 @@
-// proxy.go (no allowed host restriction)
+// proxy/proxy.go
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"io"
+	bytes "bytes"
+	json "encoding/json"
+	fmt "fmt"
+	io "io"
+	log "log"
 	"net/http"
-	"net/url"
+	urlpkg "net/url"
+	"strings"
 	"sync"
 	"time"
 )
 
-type Target struct {
-	URL    string                 `json:"url"`
-	Method string                 `json:"method"`
-	Body   map[string]interface{} `json:"body,omitempty"`
-}
-
+// Unified ProxyHandler for batch proxying
 func ProxyHandler(cfg Config) http.HandlerFunc {
 	transport := &http.Transport{
 		MaxIdleConns:        100,
@@ -32,48 +30,75 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		var targets []Target
-		if err := json.NewDecoder(r.Body).Decode(&targets); err != nil {
+		var requests []map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&requests); err != nil {
 			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 			return
 		}
 
 		var wg sync.WaitGroup
-		responses := make([]map[string]interface{}, len(targets))
+		responses := make([]map[string]interface{}, len(requests))
 
-		for i, target := range targets {
+		for i, reqData := range requests {
 			wg.Add(1)
-			go func(i int, target Target) {
+			go func(i int, reqData map[string]interface{}) {
 				defer wg.Done()
 
-				parsedURL, err := url.Parse(target.URL)
+				urlStr, _ := reqData["url"].(string)
+				method, _ := reqData["method"].(string)
+				if method == "" {
+					method = http.MethodGet
+				} else {
+					method = strings.ToUpper(method)
+				}
+
+				parsedURL, err := urlpkg.Parse(urlStr)
 				if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-					responses[i] = map[string]interface{}{"url": target.URL, "error": "Invalid URL"}
+					responses[i] = map[string]interface{}{"url": urlStr, "error": "Invalid URL"}
 					return
+				}
+
+				if !cfg.AllowInsecure && parsedURL.Scheme != "https" {
+					responses[i] = map[string]interface{}{"url": urlStr, "error": "Only HTTPS requests are allowed"}
+					return
+				}
+
+				if params, ok := reqData["params"].(map[string]interface{}); ok && method == http.MethodGet {
+					query := parsedURL.Query()
+					for k, v := range params {
+						query.Set(k, fmt.Sprintf("%v", v))
+					}
+					parsedURL.RawQuery = query.Encode()
+					urlStr = parsedURL.String()
 				}
 
 				var reqBody io.Reader
-				if target.Body != nil {
-					bodyBytes, _ := json.Marshal(target.Body)
-					reqBody = bytes.NewBuffer(bodyBytes)
+				if method != http.MethodGet {
+					if bodyData, ok := reqData["body"].(map[string]interface{}); ok {
+						bodyBytes, _ := json.Marshal(bodyData)
+						reqBody = bytes.NewBuffer(bodyBytes)
+					}
 				}
 
-				method := target.Method
-				if method == "" {
-					method = "GET"
-				}
-
-				req, err := http.NewRequest(method, target.URL, reqBody)
+				req, err := http.NewRequest(method, urlStr, reqBody)
 				if err != nil {
-					responses[i] = map[string]interface{}{"url": target.URL, "error": "Request creation failed"}
+					responses[i] = map[string]interface{}{"url": urlStr, "error": "Request creation failed"}
 					return
 				}
+
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("Accept", "application/json")
 
+				if headers, ok := reqData["headers"].(map[string]interface{}); ok {
+					for k, v := range headers {
+						req.Header.Set(k, fmt.Sprintf("%v", v))
+					}
+				}
+
+				log.Printf("[Proxy] Forwarding: METHOD=%s, URL=%s", method, urlStr)
 				resp, err := client.Do(req)
 				if err != nil {
-					responses[i] = map[string]interface{}{"url": target.URL, "error": err.Error()}
+					responses[i] = map[string]interface{}{"url": urlStr, "error": err.Error()}
 					return
 				}
 				defer resp.Body.Close()
@@ -83,12 +108,12 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 				json.Unmarshal(respBytes, &respJSON)
 
 				responses[i] = map[string]interface{}{
-					"url":     target.URL,
+					"url":     urlStr,
 					"status":  resp.StatusCode,
 					"headers": resp.Header,
 					"body":    respJSON,
 				}
-			}(i, target)
+			}(i, reqData)
 		}
 
 		wg.Wait()
@@ -96,4 +121,82 @@ func ProxyHandler(cfg Config) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(responses)
 	}
+}
+
+// ProxySingle enables internal single-call usage without duplicating logic
+func ProxySingle(cfg Config, reqData map[string]interface{}) (map[string]interface{}, error) {
+	transport := &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 10,
+		MaxConnsPerHost:     10,
+		IdleConnTimeout:     30 * time.Second,
+	}
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+
+	urlStr, _ := reqData["url"].(string)
+	method, _ := reqData["method"].(string)
+	if method == "" {
+		method = http.MethodGet
+	} else {
+		method = strings.ToUpper(method)
+	}
+
+	parsedURL, err := urlpkg.Parse(urlStr)
+	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return nil, fmt.Errorf("invalid URL")
+	}
+
+	if !cfg.AllowInsecure && parsedURL.Scheme != "https" {
+		return nil, fmt.Errorf("only HTTPS requests are allowed")
+	}
+
+	if params, ok := reqData["params"].(map[string]interface{}); ok && method == http.MethodGet {
+		query := parsedURL.Query()
+		for k, v := range params {
+			query.Set(k, fmt.Sprintf("%v", v))
+		}
+		parsedURL.RawQuery = query.Encode()
+		urlStr = parsedURL.String()
+	}
+
+	var reqBody io.Reader
+	if method != http.MethodGet {
+		if bodyData, ok := reqData["body"].(map[string]interface{}); ok {
+			bodyBytes, _ := json.Marshal(bodyData)
+			reqBody = bytes.NewBuffer(bodyBytes)
+		}
+	}
+
+	req, err := http.NewRequest(method, urlStr, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("request creation failed")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	if headers, ok := reqData["headers"].(map[string]interface{}); ok {
+		for k, v := range headers {
+			req.Header.Set(k, fmt.Sprintf("%v", v))
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBytes, _ := io.ReadAll(resp.Body)
+	var respJSON interface{}
+	json.Unmarshal(respBytes, &respJSON)
+
+	result := map[string]interface{}{
+		"url":     urlStr,
+		"status":  resp.StatusCode,
+		"headers": resp.Header,
+		"body":    respJSON,
+	}
+
+	return result, nil
 }

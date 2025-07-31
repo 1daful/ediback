@@ -4,39 +4,37 @@ package main
 import (
 	"log"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
 	Port           string
-	AllowedHosts   []string
 	AllowedOrigins []string
+	AllowInsecure  bool
 }
 
 func LoadConfig() Config {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "2000"
-	}
+	port := getEnv("PORT", "2000")
 
-	allowedHosts := strings.Split(os.Getenv("ALLOWED_HOSTS"), ",")
-	if len(allowedHosts) == 0 || allowedHosts[0] == "" {
-		allowedHosts = []string{"localhost", "127.0.0.1"}
-	}
+	originsEnv := getEnv("ALLOWED_ORIGINS", "*")
+	allowedOrigins := strings.Split(originsEnv, ",")
 
-	allowedOrigins := strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",")
-	if len(allowedOrigins) == 0 || allowedOrigins[0] == "" {
-		allowedOrigins = []string{"*"}
-	}
+	allowInsecure, _ := strconv.ParseBool(getEnv("ALLOW_INSECURE", "false"))
 
-	log.Println("[proxy-server] Config Loaded")
-	log.Println("Port:", port)
-	log.Println("Allowed Hosts:", allowedHosts)
-	log.Println("Allowed Origins:", allowedOrigins)
+	log.Printf("[config] Loaded | Port: %s | AllowedOrigins: %v | AllowInsecure: %v",
+		port, allowedOrigins, allowInsecure)
 
 	return Config{
 		Port:           port,
-		AllowedHosts:   allowedHosts,
 		AllowedOrigins: allowedOrigins,
+		AllowInsecure:  allowInsecure,
 	}
+}
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
